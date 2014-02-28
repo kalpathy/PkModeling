@@ -10,6 +10,7 @@
   See License.txt or http://www.slicer.org/copyright/copyright.txt for details.
 =========================================================================*/
 
+//const double PI  =3.141592653589793238462;
 
 #include "PkModelingCLP.h"
 
@@ -56,6 +57,102 @@ type Get##name(itk::MetaDataDictionary& dictionary)           \
 //SimpleAttributeGetMethodMacro(EchoTime, "MultiVolume.DICOM.EchoTime", float);
 SimpleAttributeGetMethodMacro(RepetitionTime, "MultiVolume.DICOM.RepetitionTime",float);
 SimpleAttributeGetMethodMacro(FlipAngle, "MultiVolume.DICOM.FlipAngle", float);
+
+std::vector<double> generateAIF( int n, double FR, int timeOfBolus );
+
+// See "Experimentally-Derived Functional Form for a Population-Averaged High-
+// Temporal-Resolution Arterial Input Function for Dynamic Contrast-Enhanced
+// MRI" - Parker, Robers, Macdonald, Buonaccorsi, Cheung, Buckley, Jackson,
+// Watson, Davies, Jayson.  Magnetic Resonance in Medicine 56:993-1000 (2006)
+std::vector<double> generateAIF( int n, double FR, int timeOfBolus ) {
+
+    std::vector<double> AIF(n);
+
+    // Make this "numTimePoints"?
+    size_t numTimePoints = AIF.size() - timeOfBolus;
+
+    //t=FR*[0:numTimePoints-1]/60;
+    std::vector<double> t(numTimePoints);
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        t[j] = FR * j / 60.0;
+    }
+
+    // These simplify the algorithm code a bit.
+    double numerator, denominator;
+
+    // Parker
+    // defining parameters
+    double a1(0.809);
+    double a2(0.330);
+    double T1(0.17406);
+    double T2(0.365);
+    double sigma1(0.0563);
+    double sigma2(0.132);
+    double alpha(1.050);
+    double beta(0.1685);
+    double s(38.078);
+    double tau(0.483);
+
+
+    // term0=alpha*exp(-beta*t)./(1+exp(-s*(t-tau)));
+    std::vector<double> term0(numTimePoints);
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        term0[j] = alpha * exp(-beta*t[j]) / (1 + exp( -s * (t[j] - tau)));
+    }
+
+
+    // term1=[];
+    // term2=[];
+    double A1 = a1 / (sigma1 * pow((2*M_PI), 0.5));
+
+    // B1=exp(-(t-T1).^2./(2.*sigma1^2));
+    std::vector<double> B1(numTimePoints);
+    denominator = 2.0 * pow(sigma1, 2.0);
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        numerator = -1 * pow(-(t[j] - T1), 2.0);
+        B1[j] = exp( numerator / denominator );
+    }
+
+    // term1=A1.*B1;
+    std::vector<double> term1(numTimePoints);
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        term1[j] = A1 * B1[j];
+    }
+
+
+    // A2=a2/(sigma2*((2*pi)^0.5));
+    double A2 = a2 / (sigma2 * pow(2*M_PI, 0.5));
+
+    //B2=exp(-(t-T2).^2./(2.*sigma2^2));
+    std::vector<double> B2(numTimePoints);
+    denominator = 2.0 * pow(sigma2, 2.0);
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        numerator = -1 * pow(-(t[j] - T2), 2.0);
+        B2[j] = exp(numerator / denominator);
+    }
+
+    // term2=A2.*B2;
+    std::vector<double> term2(numTimePoints);
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        term2[j] = A2 * B2[j];
+    }
+
+    // aifPost=term0+term1+term2;
+    std::vector<double> aifPost(numTimePoints);
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        aifPost[j] = term0[j] + term1[j] + term2[j];
+    }
+
+    // sp=timeOfBolus+1;
+    // AIF(sp:end)=aifPost;
+    for ( size_t j = timeOfBolus; j < AIF.size(); ++j ) {
+        AIF[j] = aifPost[j - timeOfBolus];
+    }
+
+    return(AIF);
+    
+}
+
 
 std::vector<float> GetTiming(itk::MetaDataDictionary& dictionary)
 {

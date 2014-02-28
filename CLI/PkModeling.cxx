@@ -58,27 +58,34 @@ type Get##name(itk::MetaDataDictionary& dictionary)           \
 SimpleAttributeGetMethodMacro(RepetitionTime, "MultiVolume.DICOM.RepetitionTime",float);
 SimpleAttributeGetMethodMacro(FlipAngle, "MultiVolume.DICOM.FlipAngle", float);
 
-std::vector<double> generateAIF( int n, double FR, int timeOfBolus );
+bool generatePopulationAIF( int n, double FR, int timeOfBolus,
+ 		            std::vector<float>& timing,
+ 		            std::vector<float>& popAIF );
 
 // See "Experimentally-Derived Functional Form for a Population-Averaged High-
 // Temporal-Resolution Arterial Input Function for Dynamic Contrast-Enhanced
 // MRI" - Parker, Robers, Macdonald, Buonaccorsi, Cheung, Buckley, Jackson,
 // Watson, Davies, Jayson.  Magnetic Resonance in Medicine 56:993-1000 (2006)
-std::vector<double> generateAIF( int n, double FR, int timeOfBolus ) {
+bool generatePopulationAIF
+( 
+    int n,
+    double FR,
+    int timeOfBolus,
+    std::vector<float>& time,
+    std::vector<float>& AIF
+)
+{
 
-    std::vector<double> AIF(n);
+    time.resize(n);
+    AIF.resize(n);
 
     // Make this "numTimePoints"?
     size_t numTimePoints = AIF.size() - timeOfBolus;
 
     //t=FR*[0:numTimePoints-1]/60;
-    std::vector<double> t(numTimePoints);
     for ( size_t j = 0; j < numTimePoints; ++j ) {
-        t[j] = FR * j / 60.0;
+        time[j] = FR * j / 60.0;
     }
-
-    // These simplify the algorithm code a bit.
-    double numerator, denominator;
 
     // Parker
     // defining parameters
@@ -97,7 +104,7 @@ std::vector<double> generateAIF( int n, double FR, int timeOfBolus ) {
     // term0=alpha*exp(-beta*t)./(1+exp(-s*(t-tau)));
     std::vector<double> term0(numTimePoints);
     for ( size_t j = 0; j < numTimePoints; ++j ) {
-        term0[j] = alpha * exp(-beta*t[j]) / (1 + exp( -s * (t[j] - tau)));
+        term0[j] = alpha * exp(-beta*time[j]) / (1 + exp( -s * (time[j] - tau)));
     }
 
 
@@ -106,10 +113,11 @@ std::vector<double> generateAIF( int n, double FR, int timeOfBolus ) {
     double A1 = a1 / (sigma1 * pow((2*M_PI), 0.5));
 
     // B1=exp(-(t-T1).^2./(2.*sigma1^2));
+    double numerator, denominator;
     std::vector<double> B1(numTimePoints);
     denominator = 2.0 * pow(sigma1, 2.0);
     for ( size_t j = 0; j < numTimePoints; ++j ) {
-        numerator = -1 * pow(-(t[j] - T1), 2.0);
+        numerator = -1 * pow(-(time[j] - T1), 2.0);
         B1[j] = exp( numerator / denominator );
     }
 
@@ -127,7 +135,7 @@ std::vector<double> generateAIF( int n, double FR, int timeOfBolus ) {
     std::vector<double> B2(numTimePoints);
     denominator = 2.0 * pow(sigma2, 2.0);
     for ( size_t j = 0; j < numTimePoints; ++j ) {
-        numerator = -1 * pow(-(t[j] - T2), 2.0);
+        numerator = -1 * pow(-(time[j] - T2), 2.0);
         B2[j] = exp(numerator / denominator);
     }
 
@@ -149,7 +157,7 @@ std::vector<double> generateAIF( int n, double FR, int timeOfBolus ) {
         AIF[j] = aifPost[j - timeOfBolus];
     }
 
-    return(AIF);
+    return(true);
     
 }
 
@@ -357,19 +365,15 @@ int DoIt( int argc, char * argv[], const T1 &, const T2 &)
     
   //   }
 
-  // FlipAngle
-  float FAValue = 0.0;
-  try 
-    {
-    FAValue = GetFlipAngle(inputVectorVolume->GetMetaDataDictionary());
-    }
-  catch (itk::ExceptionObject &exc)
-    {
-    itkGenericExceptionMacro(<< exc.GetDescription() 
-            << " Image " << InputFourDImageFileName.c_str() 
-            << " does not contain sufficient attributes to support algorithms.");
-    return EXIT_FAILURE;
-    
+    // FlipAngle
+    float FAValue = 0.0;
+    try {
+        FAValue = GetFlipAngle(inputVectorVolume->GetMetaDataDictionary());
+    } catch (itk::ExceptionObject &exc) {
+        itkGenericExceptionMacro(<< exc.GetDescription() 
+                << " Image " << InputFourDImageFileName.c_str() 
+                << " does not contain sufficient attributes to support algorithms.");
+        return EXIT_FAILURE;
     }
 
   // RepetitionTime
@@ -390,65 +394,71 @@ int DoIt( int argc, char * argv[], const T1 &, const T2 &)
   //Read AIF mask
   typename MaskVolumeReaderType::Pointer aifMaskVolumeReader = MaskVolumeReaderType::New();
   typename MaskVolumeType::Pointer aifMaskVolume = 0;
-  if (AIFMaskFileName != "")
-    {
-    aifMaskVolumeReader->SetFileName(AIFMaskFileName.c_str() );
-    aifMaskVolumeReader->Update();
-    aifMaskVolume = aifMaskVolumeReader->GetOutput();
-    }
+  if (AIFMaskFileName != "") {
+      aifMaskVolumeReader->SetFileName(AIFMaskFileName.c_str() );
+      aifMaskVolumeReader->Update();
+      aifMaskVolume = aifMaskVolumeReader->GetOutput();
+  }
 
   //Read ROI mask
   typename MaskVolumeReaderType::Pointer roiMaskVolumeReader = MaskVolumeReaderType::New();
   typename MaskVolumeType::Pointer roiMaskVolume = 0;
-  if (ROIMaskFileName != "")
-    {
-    roiMaskVolumeReader->SetFileName(ROIMaskFileName.c_str() );
-    roiMaskVolumeReader->Update();
-    roiMaskVolume = roiMaskVolumeReader->GetOutput();
+  if (ROIMaskFileName != "") {
+      roiMaskVolumeReader->SetFileName(ROIMaskFileName.c_str() );
+      roiMaskVolumeReader->Update();
+      roiMaskVolume = roiMaskVolumeReader->GetOutput();
 
-    typename ResamplerType::Pointer resampler = ResamplerType::New();
-    typename InterpolatorType::Pointer interpolator = InterpolatorType::New();
+      typename ResamplerType::Pointer resampler = ResamplerType::New();
+      typename InterpolatorType::Pointer interpolator = InterpolatorType::New();
 
-    resampler->SetOutputDirection(inputVectorVolume->GetDirection());
-    resampler->SetOutputSpacing(inputVectorVolume->GetSpacing());
-    resampler->SetOutputStartIndex(inputVectorVolume->GetBufferedRegion().GetIndex());
-    resampler->SetSize(inputVectorVolume->GetBufferedRegion().GetSize());
-    resampler->SetOutputOrigin(inputVectorVolume->GetOrigin());
-    resampler->SetInput(roiMaskVolume);
-    resampler->SetInterpolator(interpolator);
-    resampler->Update();
+      resampler->SetOutputDirection(inputVectorVolume->GetDirection());
+      resampler->SetOutputSpacing(inputVectorVolume->GetSpacing());
+      resampler->SetOutputStartIndex(inputVectorVolume->GetBufferedRegion().GetIndex());
+      resampler->SetSize(inputVectorVolume->GetBufferedRegion().GetSize());
+      resampler->SetOutputOrigin(inputVectorVolume->GetOrigin());
+      resampler->SetInput(roiMaskVolume);
+      resampler->SetInterpolator(interpolator);
+      resampler->Update();
 
-    roiMaskVolume = resampler->GetOutput();
-    }
+      roiMaskVolume = resampler->GetOutput();
+  }
 
   //Read prescribed aif
   bool usingPrescribedAIF = false;
+  bool usingPopulationAIF = false;
   std::vector<float> prescribedAIFTiming;
   std::vector<float> prescribedAIF;
-  if (PrescribedAIFFileName != "")
-    {
-    usingPrescribedAIF = GetPrescribedAIF(PrescribedAIFFileName, prescribedAIFTiming, prescribedAIF);
-    }
+  std::vector<float> populationAIFTiming;
+  std::vector<float> populationAIF;
+  if (UsePopulationAIF) {
+      // using N = 100
+      // using FR = 0.5
+      // using timeOfBolus = 31
+      usingPopulationAIF = generatePopulationAIF(100, 0.5, 31,
+		                                 populationAIFTiming,
+						 populationAIF);
+  } else if (PrescribedAIFFileName != "") {
+      usingPrescribedAIF = GetPrescribedAIF(PrescribedAIFFileName, prescribedAIFTiming, prescribedAIF);
+  }
  
-  if (AIFMaskFileName == "" && !usingPrescribedAIF)
-    {
-    std::cerr << "Either a mask localizing the region over which to calculate the arterial input function or a prescribed arterial input function must be specified." << std::endl;
-    return EXIT_FAILURE;
-    }
+  if (AIFMaskFileName == "" && !usingPrescribedAIF && !usingPopulationAIF) {
+      std::cerr << "Either a mask localizing the region over which to ";
+      std::cerr << "calculate the arterial input function or a prescribed ";
+      std::cerr << "arterial input function must be specified." << std::endl;
+      return EXIT_FAILURE;
+  }
 
   //Convert to concentration values
   typedef itk::SignalIntensityToConcentrationImageFilter<VectorVolumeType,MaskVolumeType,FloatVectorVolumeType> ConvertFilterType;
   typename ConvertFilterType::Pointer converter = ConvertFilterType::New();
   converter->SetInput(inputVectorVolume);
-  if (!usingPrescribedAIF)
-    {
+  if (!usingPrescribedAIF) {
     converter->SetAIFMask(aifMaskVolume);
-    }
+  }
 
-  if(ROIMaskFileName != "")
-    {
-    converter->SetROIMask(roiMaskVolume);
-    }
+  if(ROIMaskFileName != "") {
+      converter->SetROIMask(roiMaskVolume);
+  }
 
   converter->SetT1PreBlood(T1PreBloodValue);
   converter->SetT1PreTissue(T1PreTissueValue);
@@ -459,34 +469,29 @@ int DoIt( int argc, char * argv[], const T1 &, const T2 &)
   itk::PluginFilterWatcher watchConverter(converter, "Concentrations",  CLPProcessInformation,  1.0 / 20.0, 0.0);
   converter->Update();
 
-  if(OutputConcentrationsImageFileName != "")
-    {
-    // need to initialize the attributes, otherwise Slicer treats 
-    //  this as a Vector volume, not MultiVolume
-    FloatVectorVolumeType::Pointer concentrationsVolume = converter->GetOutput();
-    concentrationsVolume->SetMetaDataDictionary(inputVectorVolume->GetMetaDataDictionary());
+  if(OutputConcentrationsImageFileName != "") {
+      // need to initialize the attributes, otherwise Slicer treats 
+      //  this as a Vector volume, not MultiVolume
+      FloatVectorVolumeType::Pointer concentrationsVolume = converter->GetOutput();
+      concentrationsVolume->SetMetaDataDictionary(inputVectorVolume->GetMetaDataDictionary());
 
-    typename VectorVolumeWriterType::Pointer multiVolumeWriter
-      = VectorVolumeWriterType::New();
-    multiVolumeWriter->SetFileName(OutputConcentrationsImageFileName.c_str());
-    multiVolumeWriter->SetInput(concentrationsVolume);
-    multiVolumeWriter->SetUseCompression(1);
-    multiVolumeWriter->Update();
-    }
+      typename VectorVolumeWriterType::Pointer multiVolumeWriter = VectorVolumeWriterType::New();
+      multiVolumeWriter->SetFileName(OutputConcentrationsImageFileName.c_str());
+      multiVolumeWriter->SetInput(concentrationsVolume);
+      multiVolumeWriter->SetUseCompression(1);
+      multiVolumeWriter->Update();
+  }
 
   //Calculate parameters
   typedef itk::ConcentrationToQuantitativeImageFilter<FloatVectorVolumeType, MaskVolumeType, OutputVolumeType> QuantifierType;
   typename QuantifierType::Pointer quantifier = QuantifierType::New();
   quantifier->SetInput(converter->GetOutput());
-  if (usingPrescribedAIF)
-    {
-    quantifier->SetPrescribedAIF(prescribedAIFTiming, prescribedAIF);
-    quantifier->UsePrescribedAIFOn();
-    }
-  else
-    {
-    quantifier->SetAIFMask(aifMaskVolume );
-    }
+  if (usingPrescribedAIF) {
+      quantifier->SetPrescribedAIF(prescribedAIFTiming, prescribedAIF);
+      quantifier->UsePrescribedAIFOn();
+  } else {
+      quantifier->SetAIFMask(aifMaskVolume );
+  }
 
   quantifier->SetAUCTimeInterval(AUCTimeInterval);
   quantifier->SetTiming(Timing);
@@ -496,19 +501,15 @@ int DoIt( int argc, char * argv[], const T1 &, const T2 &)
   quantifier->Setepsilon(Epsilon);
   quantifier->SetmaxIter(MaxIter);
   quantifier->Sethematocrit(Hematocrit);
-  if(ROIMaskFileName != "")
-    {
-    quantifier->SetROIMask(roiMaskVolume);
-    }
+  if(ROIMaskFileName != "") {
+      quantifier->SetROIMask(roiMaskVolume);
+  }
 
-  if(ComputeFpv)
-    {
-    quantifier->SetModelType(itk::LMCostFunction::TOFTS_3_PARAMETER);
-    }
-  else
-    {
-    quantifier->SetModelType(itk::LMCostFunction::TOFTS_2_PARAMETER);
-    }
+  if(ComputeFpv) {
+      quantifier->SetModelType(itk::LMCostFunction::TOFTS_3_PARAMETER);
+  } else {
+      quantifier->SetModelType(itk::LMCostFunction::TOFTS_2_PARAMETER);
+  }
   quantifier->SetMaskByRSquared(OutputRSquaredFileName.empty());
 
   itk::PluginFilterWatcher watchQuantifier(quantifier, "Quantifying",  CLPProcessInformation,  19.0 / 20.0, 1.0 / 20.0);
@@ -516,77 +517,68 @@ int DoIt( int argc, char * argv[], const T1 &, const T2 &)
 
 
   //set output
-  if (!OutputKtransFileName.empty())
-    {
-    typename OutputVolumeWriterType::Pointer ktranswriter = OutputVolumeWriterType::New();
-    ktranswriter->SetInput(quantifier->GetKTransOutput() );
-    ktranswriter->SetFileName(OutputKtransFileName.c_str() );
-    ktranswriter->SetUseCompression(1);
-    ktranswriter->Update();
-    }
+  if (!OutputKtransFileName.empty()) {
+      typename OutputVolumeWriterType::Pointer ktranswriter = OutputVolumeWriterType::New();
+      ktranswriter->SetInput(quantifier->GetKTransOutput() );
+      ktranswriter->SetFileName(OutputKtransFileName.c_str() );
+      ktranswriter->SetUseCompression(1);
+      ktranswriter->Update();
+  }
 
-  if (!OutputVeFileName.empty())
-    {
-    typename OutputVolumeWriterType::Pointer vewriter = OutputVolumeWriterType::New();
-    vewriter->SetInput(quantifier->GetVEOutput() );
-    vewriter->SetFileName(OutputVeFileName.c_str() );
-    vewriter->SetUseCompression(1);
-    vewriter->Update();
-    }
+  if (!OutputVeFileName.empty()) {
+      typename OutputVolumeWriterType::Pointer vewriter = OutputVolumeWriterType::New();
+      vewriter->SetInput(quantifier->GetVEOutput() );
+      vewriter->SetFileName(OutputVeFileName.c_str() );
+      vewriter->SetUseCompression(1);
+      vewriter->Update();
+  }
 
-  if(ComputeFpv)
-    {
-    if (!OutputFpvFileName.empty())
-      {
-      typename OutputVolumeWriterType::Pointer fpvwriter =OutputVolumeWriterType::New();
-      fpvwriter->SetInput(quantifier->GetFPVOutput() );
-      fpvwriter->SetFileName(OutputFpvFileName.c_str() );
-      fpvwriter->SetUseCompression(1);
-      fpvwriter->Update();
+  if(ComputeFpv) {
+      if (!OutputFpvFileName.empty()) {
+          typename OutputVolumeWriterType::Pointer fpvwriter =OutputVolumeWriterType::New();
+          fpvwriter->SetInput(quantifier->GetFPVOutput() );
+          fpvwriter->SetFileName(OutputFpvFileName.c_str() );
+          fpvwriter->SetUseCompression(1);
+          fpvwriter->Update();
       }
-    }
+  }
 
-  if (!OutputMaxSlopeFileName.empty())
-    {
-    typename OutputVolumeWriterType::Pointer maxSlopewriter = OutputVolumeWriterType::New();
-    maxSlopewriter->SetInput(quantifier->GetMaxSlopeOutput() );
-    maxSlopewriter->SetFileName(OutputMaxSlopeFileName.c_str() );
-    maxSlopewriter->SetUseCompression(1);
-    maxSlopewriter->Update();
-    }
+  if (!OutputMaxSlopeFileName.empty()) {
+      typename OutputVolumeWriterType::Pointer maxSlopewriter = OutputVolumeWriterType::New();
+      maxSlopewriter->SetInput(quantifier->GetMaxSlopeOutput() );
+      maxSlopewriter->SetFileName(OutputMaxSlopeFileName.c_str() );
+      maxSlopewriter->SetUseCompression(1);
+      maxSlopewriter->Update();
+  }
 
-  if (!OutputAUCFileName.empty())
-    {
-    typename OutputVolumeWriterType::Pointer aucwriter = OutputVolumeWriterType::New();
-    aucwriter->SetInput(quantifier->GetAUCOutput() );
-    aucwriter->SetFileName(OutputAUCFileName.c_str() );
-    aucwriter->SetUseCompression(1);
-    aucwriter->Update();
-    }
+  if (!OutputAUCFileName.empty()) {
+      typename OutputVolumeWriterType::Pointer aucwriter = OutputVolumeWriterType::New();
+      aucwriter->SetInput(quantifier->GetAUCOutput() );
+      aucwriter->SetFileName(OutputAUCFileName.c_str() );
+      aucwriter->SetUseCompression(1);
+      aucwriter->Update();
+  }
 
-  if (!OutputRSquaredFileName.empty())
-    {
-    typename OutputVolumeWriterType::Pointer rsqwriter =OutputVolumeWriterType::New();
-    rsqwriter->SetInput(quantifier->GetRSquaredOutput() );
-    rsqwriter->SetFileName(OutputRSquaredFileName.c_str() );
-    rsqwriter->SetUseCompression(1);
-    rsqwriter->Update();
-    }
+  if (!OutputRSquaredFileName.empty()) {
+      typename OutputVolumeWriterType::Pointer rsqwriter =OutputVolumeWriterType::New();
+      rsqwriter->SetInput(quantifier->GetRSquaredOutput() );
+      rsqwriter->SetFileName(OutputRSquaredFileName.c_str() );
+      rsqwriter->SetUseCompression(1);
+      rsqwriter->Update();
+  }
 
-  if (!OutputFittedDataImageFileName.empty())
-    {
-    // need to initialize the attributes, otherwise Slicer treats 
-    //  this as a Vector volume, not MultiVolume
-    FloatVectorVolumeType::Pointer fittedVolume = quantifier->GetFittedDataOutput();
-    fittedVolume->SetMetaDataDictionary(inputVectorVolume->GetMetaDataDictionary());
+  if (!OutputFittedDataImageFileName.empty()) {
+      // need to initialize the attributes, otherwise Slicer treats 
+      //  this as a Vector volume, not MultiVolume
+      FloatVectorVolumeType::Pointer fittedVolume = quantifier->GetFittedDataOutput();
+      fittedVolume->SetMetaDataDictionary(inputVectorVolume->GetMetaDataDictionary());
 
-    typename VectorVolumeWriterType::Pointer multiVolumeWriter
-      = VectorVolumeWriterType::New();
-    multiVolumeWriter->SetFileName(OutputFittedDataImageFileName.c_str());
-    multiVolumeWriter->SetInput(fittedVolume);
-    multiVolumeWriter->SetUseCompression(1);
-    multiVolumeWriter->Update();
-    }
+      typename VectorVolumeWriterType::Pointer multiVolumeWriter = VectorVolumeWriterType::New();
+      multiVolumeWriter->SetFileName(OutputFittedDataImageFileName.c_str());
+      multiVolumeWriter->SetInput(fittedVolume);
+      multiVolumeWriter->SetUseCompression(1);
+      multiVolumeWriter->Update();
+  }
 
   return EXIT_SUCCESS;
 }  

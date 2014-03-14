@@ -30,6 +30,7 @@ ConcentrationToQuantitativeImageFilter<TInputImage,TMaskImage,TOutputImage>::Con
   m_hematocrit = 0.4f;
   m_aifAUC = 0.0f;
   m_AIFBATIndex = 0;
+  m_UsePopulationAIF = false;
   m_UsePrescribedAIF = false;
   m_MaskByRSquared = true;
   m_ModelType = itk::LMCostFunction::TOFTS_2_PARAMETER;
@@ -56,6 +57,15 @@ ConcentrationToQuantitativeImageFilter<TInputImage,TMaskImage,TOutputImage>
     return VectorVolumeType::New().GetPointer();
   }
   return 0;
+}
+
+// Set a population AIF.
+template< class TInputImage, class TMaskImage, class TOutputImage >
+void
+ConcentrationToQuantitativeImageFilter< TInputImage, TMaskImage, TOutputImage >
+::SetPopulationAIF()
+{
+    m_UsePopulationAIF = true;
 }
 
 // Set a prescribed AIF.  This is not currrently in the input vector,
@@ -241,11 +251,21 @@ ConcentrationToQuantitativeImageFilter<TInputImage,TMaskImage,TOutputImage>
       *ait = a;
       }
     }
-  else if (maskVolume)
+  else if (maskVolume && ! m_UsePopulationAIF)
     {
     // calculate the AIF from the image using the data under the
     // specified mask
     m_AIF = this->CalculateAverageAIF(inputVectorVolume, maskVolume);
+    }
+  else if (m_UsePopulationAIF)
+    {
+    // Estimate the AIF from the image using the data under the
+    // specified mask.  then use that o ballpark the bolus
+    // arrival time, and finally use that to bootstrap the population AIF.
+    m_AIF = this->CalculateAverageAIF(inputVectorVolume, maskVolume);
+    compute_bolus_arrival_time (timeSize, &m_AIF[0], m_AIFBATIndex, aif_FirstPeakIndex, aif_MaxSlope);
+    m_AIF = this->CalculatePopulationAIF(1.0, m_AIFBATIndex, m_Timing);
+
     }
   else
     {
@@ -416,7 +436,7 @@ ConcentrationToQuantitativeImageFilter<TInputImage,TMaskImage,TOutputImage>
           }
         itk::LMCostFunction::MeasureType measure =
           costFunction->GetFittedFunction(param);
-        for(int i=0;i<fittedVectorVoxel.GetSize();i++)
+        for(size_t i=0;i<fittedVectorVoxel.GetSize();i++)
         {
           fittedVectorVoxel[i] = measure[i];
         }
@@ -547,6 +567,129 @@ ConcentrationToQuantitativeImageFilter<TInputImage,TMaskImage,TOutputImage>
     progress.CompletedPixel();
   }
 }
+
+// Calculate a population AIF.
+//
+// See "Experimentally-Derived Functional Form for a Population-Averaged High-
+// Temporal-Resolution Arterial Input Function for Dynamic Contrast-Enhanced
+// MRI" - Parker, Robers, Macdonald, Buonaccorsi, Cheung, Buckley, Jackson,
+// Watson, Davies, Jayson.  Magnetic Resonance in Medicine 56:993-1000 (2006)
+template <class TInputImage, class TMaskImage, class TOutputImage>
+std::vector<float>
+ConcentrationToQuantitativeImageFilter<TInputImage, TMaskImage, TOutputImage>
+::CalculatePopulationAIF(const double FR, const size_t timeOfBolus, std::vector<float> time)
+{
+
+    // Inputs
+    // ------
+    // FR : frequency between time points in seconds
+    // timeOfBolus : arrival time for bolus
+    // time : sequence time
+    //
+    // Outputs
+    // -------
+    // AIF : arterial input function as a function of time
+    //
+    // Returns
+    // -------
+    // true : always
+    std::vector<float> AIF;
+
+    size_t n = time.size();
+    AIF.resize(n);
+
+    size_t numTimePoints = n - timeOfBolus;
+    std::vector<float> timeSinceBolus(numTimePoints);
+
+
+    // t=FR*[0:numTimePoints-1]/60;
+    // These time points "start" when the bolus arrives.
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        //timeSinceBolus[j] = FR * j / 60.0;
+	// Convert from seconds to minutes (see Parker)
+        timeSinceBolus[j] = (time[timeOfBolus + j] - time[timeOfBolus]) / 60.0;
+    }
+
+    // Parker
+    // defining parameters
+    double a1(0.809);
+    double a2(0.330);
+    double T1(0.17406);
+    double T2(0.365);
+    double sigma1(0.0563);
+    double sigma2(0.132);
+    double alpha(1.050);
+    double beta(0.1685);
+    double s(38.078);
+    double tau(0.483);
+
+
+    // term0=alpha*exp(-beta*t)./(1+exp(-s*(t-tau)));
+    std::vector<double> term0(numTimePoints);
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        term0[j] = alpha * exp(-beta*timeSinceBolus[j]) / (1 + exp( -s * (timeSinceBolus[j] - tau)));
+    }
+
+
+    // term1=[];
+    // term2=[];
+    double A1 = a1 / (sigma1 * pow((2*M_PI), 0.5));
+
+    // B1=exp(-(t-T1).^2./(2.*sigma1^2));
+    double numerator, denominator;
+    std::vector<double> B1(numTimePoints);
+    denominator = 2.0 * pow(sigma1, 2.0);
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        numerator = -1 * pow(-(timeSinceBolus[j] - T1), 2.0);
+        B1[j] = exp( numerator / denominator );
+    }
+
+    // term1=A1.*B1;
+    std::vector<double> term1(numTimePoints);
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        term1[j] = A1 * B1[j];
+    }
+
+
+    // A2=a2/(sigma2*((2*pi)^0.5));
+    double A2 = a2 / (sigma2 * pow(2*M_PI, 0.5));
+
+    //B2=exp(-(t-T2).^2./(2.*sigma2^2));
+    std::vector<double> B2(numTimePoints);
+    denominator = 2.0 * pow(sigma2, 2.0);
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        numerator = -1 * pow(-(timeSinceBolus[j] - T2), 2.0);
+        B2[j] = exp(numerator / denominator);
+    }
+
+    // term2=A2.*B2;
+    std::vector<double> term2(numTimePoints);
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        term2[j] = A2 * B2[j];
+    }
+
+    // aifPost=term0+term1+term2;
+    std::vector<double> aifPost(numTimePoints);
+    for ( size_t j = 0; j < numTimePoints; ++j ) {
+        aifPost[j] = term0[j] + term1[j] + term2[j];
+    }
+
+    // Initialize values before bolus arrival.
+    for ( size_t j = 0; j < timeOfBolus; ++j ) {
+        AIF[j] = 0;
+    }
+
+    // Shift the data to take into account the bolus arrival time.
+    // sp=timeOfBolus+1;
+    // AIF(sp:end)=aifPost;
+    for ( size_t j = timeOfBolus; j < AIF.size(); ++j ) {
+        AIF[j] = aifPost[j - timeOfBolus];
+    }
+
+    return AIF;
+
+}
+
 
 // Calculate average AIF according to the AIF mask
 template <class TInputImage, class TMaskImage, class TOutputImage>

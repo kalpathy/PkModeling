@@ -58,8 +58,8 @@ type Get##name(itk::MetaDataDictionary& dictionary)           \
 SimpleAttributeGetMethodMacro(RepetitionTime, "MultiVolume.DICOM.RepetitionTime",float);
 SimpleAttributeGetMethodMacro(FlipAngle, "MultiVolume.DICOM.FlipAngle", float);
 
-bool generatePopulationAIF( int n, double FR, int timeOfBolus,
- 		            std::vector<float>& timing,
+bool generatePopulationAIF(double FR, size_t timeOfBolus,
+ 		            std::vector<float> timing,
  		            std::vector<float>& popAIF );
 
 // See "Experimentally-Derived Functional Form for a Population-Averaged High-
@@ -68,23 +68,38 @@ bool generatePopulationAIF( int n, double FR, int timeOfBolus,
 // Watson, Davies, Jayson.  Magnetic Resonance in Medicine 56:993-1000 (2006)
 bool generatePopulationAIF
 ( 
-    int n,
     double FR,
-    int timeOfBolus,
-    std::vector<float>& time,
+    size_t timeOfBolus,
+    std::vector<float> time,
     std::vector<float>& AIF
 )
 {
+    // Inputs
+    // ------
+    // FR : frequency between time points in seconds (?)
+    // timeOfBolus : arrival time for bolus
+    // time : sequence time
+    //
+    // Outputs
+    // -------
+    // AIF : arterial input function as a function of time
+    //
+    // Returns
+    // -------
+    // true : always
 
-    time.resize(n);
+    size_t n = time.size();
     AIF.resize(n);
 
-    // Make this "numTimePoints"?
-    size_t numTimePoints = AIF.size() - timeOfBolus;
+    size_t numTimePoints = n - timeOfBolus;
+    std::vector<float> timeSinceBolus(numTimePoints);
 
-    //t=FR*[0:numTimePoints-1]/60;
+
+    // t=FR*[0:numTimePoints-1]/60;
+    // These time points "start" when the bolus arrives.
     for ( size_t j = 0; j < numTimePoints; ++j ) {
-        time[j] = FR * j / 60.0;
+        //timeSinceBolus[j] = FR * j / 60.0;
+        timeSinceBolus[j] = time[timeOfBolus + j] - time[timeOfBolus];
     }
 
     // Parker
@@ -104,7 +119,7 @@ bool generatePopulationAIF
     // term0=alpha*exp(-beta*t)./(1+exp(-s*(t-tau)));
     std::vector<double> term0(numTimePoints);
     for ( size_t j = 0; j < numTimePoints; ++j ) {
-        term0[j] = alpha * exp(-beta*time[j]) / (1 + exp( -s * (time[j] - tau)));
+        term0[j] = alpha * exp(-beta*timeSinceBolus[j]) / (1 + exp( -s * (timeSinceBolus[j] - tau)));
     }
 
 
@@ -117,7 +132,7 @@ bool generatePopulationAIF
     std::vector<double> B1(numTimePoints);
     denominator = 2.0 * pow(sigma1, 2.0);
     for ( size_t j = 0; j < numTimePoints; ++j ) {
-        numerator = -1 * pow(-(time[j] - T1), 2.0);
+        numerator = -1 * pow(-(timeSinceBolus[j] - T1), 2.0);
         B1[j] = exp( numerator / denominator );
     }
 
@@ -135,7 +150,7 @@ bool generatePopulationAIF
     std::vector<double> B2(numTimePoints);
     denominator = 2.0 * pow(sigma2, 2.0);
     for ( size_t j = 0; j < numTimePoints; ++j ) {
-        numerator = -1 * pow(-(time[j] - T2), 2.0);
+        numerator = -1 * pow(-(timeSinceBolus[j] - T2), 2.0);
         B2[j] = exp(numerator / denominator);
     }
 
@@ -151,6 +166,12 @@ bool generatePopulationAIF
         aifPost[j] = term0[j] + term1[j] + term2[j];
     }
 
+    // Initialize values before bolus arrival.
+    for ( size_t j = 0; j < timeOfBolus; ++j ) {
+        AIF[j] = 0;
+    }
+
+    // Shift the data to take into account the bolus arrival time.
     // sp=timeOfBolus+1;
     // AIF(sp:end)=aifPost;
     for ( size_t j = timeOfBolus; j < AIF.size(); ++j ) {
@@ -376,19 +397,15 @@ int DoIt( int argc, char * argv[], const T1 &, const T2 &)
         return EXIT_FAILURE;
     }
 
-  // RepetitionTime
-  float TRValue = 0.0;
-  try 
-    {
-    TRValue = GetRepetitionTime(inputVectorVolume->GetMetaDataDictionary());
-    }
-  catch (itk::ExceptionObject &exc)
-    {
-    itkGenericExceptionMacro(<< exc.GetDescription() 
+    // RepetitionTime
+    float TRValue = 0.0;
+    try {
+        TRValue = GetRepetitionTime(inputVectorVolume->GetMetaDataDictionary());
+    } catch (itk::ExceptionObject &exc) {
+        itkGenericExceptionMacro(<< exc.GetDescription() 
             << " Image " << InputFourDImageFileName.c_str() 
             << " does not contain sufficient attributes to support algorithms.");
-    return EXIT_FAILURE;
-    
+        return EXIT_FAILURE;
     }
 
   //Read AIF mask
@@ -425,23 +442,13 @@ int DoIt( int argc, char * argv[], const T1 &, const T2 &)
 
   //Read prescribed aif
   bool usingPrescribedAIF = false;
-  bool usingPopulationAIF = false;
-  std::vector<float> prescribedAIFTiming;
-  std::vector<float> prescribedAIF;
-  std::vector<float> populationAIFTiming;
-  std::vector<float> populationAIF;
-  if (UsePopulationAIF) {
-      // using N = 100
-      // using FR = 0.5
-      // using timeOfBolus = 31
-      usingPopulationAIF = generatePopulationAIF(100, 0.5, 31,
-		                                 populationAIFTiming,
-						 populationAIF);
-  } else if (PrescribedAIFFileName != "") {
-      usingPrescribedAIF = GetPrescribedAIF(PrescribedAIFFileName, prescribedAIFTiming, prescribedAIF);
+  std::vector<float> AIFTiming;
+  std::vector<float> AIF;
+  if (PrescribedAIFFileName != "") {
+      usingPrescribedAIF = GetPrescribedAIF(PrescribedAIFFileName, AIFTiming, AIF);
   }
  
-  if (AIFMaskFileName == "" && !usingPrescribedAIF && !usingPopulationAIF) {
+  if (AIFMaskFileName == "" && !usingPrescribedAIF && !UsePopulationAIF) {
       std::cerr << "Either a mask localizing the region over which to ";
       std::cerr << "calculate the arterial input function or a prescribed ";
       std::cerr << "arterial input function must be specified." << std::endl;
@@ -452,9 +459,11 @@ int DoIt( int argc, char * argv[], const T1 &, const T2 &)
   typedef itk::SignalIntensityToConcentrationImageFilter<VectorVolumeType,MaskVolumeType,FloatVectorVolumeType> ConvertFilterType;
   typename ConvertFilterType::Pointer converter = ConvertFilterType::New();
   converter->SetInput(inputVectorVolume);
+
+  // Do we setAIFMask if using population AIF?  We should, should we not?
   if (!usingPrescribedAIF) {
     converter->SetAIFMask(aifMaskVolume);
-  }
+  } 
 
   if(ROIMaskFileName != "") {
       converter->SetROIMask(roiMaskVolume);
@@ -487,8 +496,11 @@ int DoIt( int argc, char * argv[], const T1 &, const T2 &)
   typename QuantifierType::Pointer quantifier = QuantifierType::New();
   quantifier->SetInput(converter->GetOutput());
   if (usingPrescribedAIF) {
-      quantifier->SetPrescribedAIF(prescribedAIFTiming, prescribedAIF);
+      quantifier->SetPrescribedAIF(AIFTiming, AIF);
       quantifier->UsePrescribedAIFOn();
+  } else if (UsePopulationAIF) {
+      quantifier->UsePopulationAIFOn();
+      quantifier->SetAIFMask(aifMaskVolume );
   } else {
       quantifier->SetAIFMask(aifMaskVolume );
   }
